@@ -7,7 +7,10 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.resteasy.annotations.cache.NoCache;
+import org.keycloak.credential.CredentialProvider;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.UserCredentialModel;
+import org.keycloak.models.credential.OTPCredentialModel;
 import org.keycloak.services.resource.RealmResourceProvider;
 
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -17,6 +20,8 @@ import org.keycloak.TokenVerifier;
 import org.keycloak.credential.CredentialModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.representations.AccessToken;
+import org.keycloak.credential.OTPCredentialProvider;
+
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -33,6 +38,10 @@ public class MyCustomRealmResourceProvider  implements RealmResourceProvider {
 
     public MyCustomRealmResourceProvider(KeycloakSession session) {
         this.session = session;
+    }
+
+    public OTPCredentialProvider getCredentialProvider(KeycloakSession session) {
+        return (OTPCredentialProvider)session.getProvider(CredentialProvider.class, "keycloak-otp");
     }
 
     @Override
@@ -109,34 +118,28 @@ public class MyCustomRealmResourceProvider  implements RealmResourceProvider {
                         .build();
             }
 
-            // 5. Recupera as credenciais OTP
-            Stream<CredentialModel> otpCredentialsStream = user.credentialManager()
-                    .getStoredCredentialsByTypeStream("otp");
+            // 5. Verifica se o usuário tem credenciais OTP configuradas
+            OTPCredentialProvider otpProvider = (OTPCredentialProvider) session.getProvider(CredentialProvider.class, "keycloak-otp");
+            OTPCredentialModel defaultOTPCredential = otpProvider.getDefaultCredential(session, session.getContext().getRealm(), user);
 
-            List<CredentialModel> otpCredentials = otpCredentialsStream.collect(Collectors.toList());
-            if (otpCredentials == null || otpCredentials.isEmpty()) {
+            if (defaultOTPCredential == null) {
                 return Response.status(Response.Status.BAD_REQUEST)
                         .entity("{\"valid\": false, \"error\": \"OTP credential not configured for user\"}")
                         .build();
             }
 
-            CredentialModel otpCredential = otpCredentials.get(0);
-            String otpSecretJson = otpCredential.getSecretData();  // Aqui vem o JSON com o valor do OTP
+            // 6. Valida o código OTP fornecido pelo usuário
+            String otpInput = input.getValue();  // Supondo que o OTP seja passado como parte do input
+            boolean valid = otpProvider.isValid(session.getContext().getRealm(), user, new UserCredentialModel(defaultOTPCredential.getId(), OTPCredentialModel.TYPE, otpInput));
 
-            // Extrair o valor do campo 'value' do JSON
-            ObjectMapper mapperVal = new ObjectMapper();
-            JsonNode jsonNode = mapperVal.readTree(otpSecretJson);
-            String otpSecret = jsonNode.get("value").asText();
-
-            if (otpSecret == null || otpSecret.isEmpty()) {
-                return Response.status(Response.Status.BAD_REQUEST)
-                        .entity("{\"valid\": false, \"error\": \"OTP secret is not set for user\"}")
+            if (!valid) {
+                return Response.status(Response.Status.UNAUTHORIZED)
+                        .entity("{\"valid\": false, \"error\": \"Invalid OTP\"}")
                         .build();
             }
 
-            return Response.ok("{\"valid\": " + otpSecret + "---" + otpCredential + "}").build();
-
-
+            // 7. Retorna sucesso se o OTP for válido
+            return Response.ok("{\"valid\": true}").build();
         } catch (Exception e) {
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
                     .entity("{\"valid\": false, \"error\": \"" + e.getMessage() + "\"}")
